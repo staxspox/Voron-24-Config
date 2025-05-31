@@ -1,0 +1,70 @@
+# Konfiguracja wentylatorów łóżka z płynnym startem
+# Wersja 3.0 - poprawiona logika włączania
+
+[gcode_macro _BEDFANVARS]
+variable_min_temp: 25       # Temperatura pokojowa
+variable_max_temp: 95       # Temperatura docelowa dla 100% mocy
+variable_min_speed: 0.1     # Minimalna prędkość startowa (10%)
+variable_max_speed: 1.0     # Maksymalna prędkość (100%)
+gcode:
+
+[fan_generic Monolith_Bed_Fan_Middle]
+pin: PD14
+kick_start_time: 0.1
+off_below: 0.05
+
+[fan_generic Monolith_Bed_Fan_Outside]
+pin: PD15
+kick_start_time: 0.1
+off_below: 0.05
+
+[delayed_gcode bedfan_control]
+gcode:
+  {% set CURRENT = printer.heater_bed.temperature %}
+  {% set TARGET = printer.heater_bed.target %}
+  {% set MIN_TEMP = printer["gcode_macro _BEDFANVARS"].min_temp|float %}
+  {% set MAX_TEMP = printer["gcode_macro _BEDFANVARS"].max_temp|float %}
+  {% set MIN_SPEED = printer["gcode_macro _BEDFANVARS"].min_speed|float %}
+  {% set MAX_SPEED = printer["gcode_macro _BEDFANVARS"].max_speed|float %}
+
+  {% if TARGET > MIN_TEMP %}
+    {% if CURRENT < MIN_TEMP %}
+      # Temperatura poniżej progu - wyłącz
+      SET_FAN_SPEED FAN=Monolith_Bed_Fan_Middle SPEED=0
+      SET_FAN_SPEED FAN=Monolith_Bed_Fan_Outside SPEED=0
+    {% else %}
+      # Oblicz prędkość (liniowo od MIN_TEMP do MAX_TEMP)
+      {% set RANGE = (MAX_TEMP - MIN_TEMP) %}
+      {% set SPEED = ((CURRENT - MIN_TEMP) / RANGE) * (MAX_SPEED - MIN_SPEED) + MIN_SPEED %}
+      {% if SPEED > MAX_SPEED %}{% set SPEED = MAX_SPEED %}{% endif %}
+      {% if SPEED < MIN_SPEED %}{% set SPEED = MIN_SPEED %}{% endif %}
+      
+      SET_FAN_SPEED FAN=Monolith_Bed_Fan_Middle SPEED={SPEED}
+      SET_FAN_SPEED FAN=Monolith_Bed_Fan_Outside SPEED={SPEED}
+    {% endif %}
+    UPDATE_DELAYED_GCODE ID=bedfan_control DURATION=1
+  {% else %}
+    # Wyłącz jeśli temperatura docelowa <= MIN_TEMP
+    SET_FAN_SPEED FAN=Monolith_Bed_Fan_Middle SPEED=0
+    SET_FAN_SPEED FAN=Monolith_Bed_Fan_Outside SPEED=0
+  {% endif %}
+
+[gcode_macro M140]
+rename_existing: M99140
+gcode:
+  SET_HEATER_TEMPERATURE HEATER=heater_bed TARGET={params.S|float}
+  UPDATE_DELAYED_GCODE ID=bedfan_control DURATION=1
+
+[gcode_macro M190]
+rename_existing: M99190
+gcode:
+  SET_HEATER_TEMPERATURE HEATER=heater_bed TARGET={params.S|float}
+  UPDATE_DELAYED_GCODE ID=bedfan_control DURATION=1
+  TEMPERATURE_WAIT SENSOR=heater_bed MINIMUM={params.S|float} MAXIMUM={params.S|float + 5}
+
+[gcode_macro TURN_OFF_HEATERS]
+rename_existing: _TURN_OFF_HEATERS
+gcode:
+  SET_FAN_SPEED FAN=Monolith_Bed_Fan_Middle SPEED=0
+  SET_FAN_SPEED FAN=Monolith_Bed_Fan_Outside SPEED=0
+  _TURN_OFF_HEATERS

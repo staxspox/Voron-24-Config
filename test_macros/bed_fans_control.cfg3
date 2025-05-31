@@ -1,0 +1,66 @@
+[fan_generic Monolith_Bed_Fan_Middle]
+pin: PD14
+kick_start_time: 0.1
+
+[fan_generic Monolith_Bed_Fan_Outside]
+pin: PD15
+kick_start_time: 0.1
+
+[gcode_macro _BEDFANVARS]
+variable_room_temp: 20
+variable_min_speed: 0.1
+variable_max_speed: 1.0
+gcode:
+
+[gcode_macro BEDFANS_OFF]
+gcode:
+  SET_FAN_SPEED FAN=Monolith_Bed_Fan_Middle SPEED=0
+  SET_FAN_SPEED FAN=Monolith_Bed_Fan_Outside SPEED=0
+  UPDATE_DELAYED_GCODE ID=bedfan_control DURATION=0
+
+[gcode_macro M140]
+rename_existing: M99140
+gcode:
+  {% set S = params.S|float %}
+  M99140 S{S}
+  {% if S > 0 %}
+    UPDATE_DELAYED_GCODE ID=bedfan_control DURATION=1
+  {% else %}
+    BEDFANS_OFF
+  {% endif %}
+
+[delayed_gcode bedfan_control]
+gcode:
+  {% set TARGET = printer.heater_bed.target|float %}
+  {% set CURRENT = printer.heater_bed.temperature|float %}
+  {% set ROOM_TEMP = printer["gcode_macro _BEDFANVARS"].room_temp|float %}
+  {% set MIN_SPEED = printer["gcode_macro _BEDFANVARS"].min_speed|float %}
+  {% set MAX_SPEED = printer["gcode_macro _BEDFANVARS"].max_speed|float %}
+  
+  {% if TARGET > 0 %}
+    {% if CURRENT < ROOM_TEMP %}
+      SET_FAN_SPEED FAN=Monolith_Bed_Fan_Middle SPEED=0
+      SET_FAN_SPEED FAN=Monolith_Bed_Fan_Outside SPEED=0
+    {% else %}
+      {% set RATIO = (CURRENT - ROOM_TEMP) / (TARGET - ROOM_TEMP) %}
+      {% set SPEED = MIN_SPEED + (MAX_SPEED - MIN_SPEED) * RATIO %}
+      {% set SPEED = SPEED|round(2) %}  # Zaokrąglenie do 2 miejsc
+      {% if SPEED < MIN_SPEED %}{% set SPEED = MIN_SPEED %}{% endif %}
+      {% if SPEED > MAX_SPEED %}{% set SPEED = MAX_SPEED %}{% endif %}
+      
+      SET_FAN_SPEED FAN=Monolith_Bed_Fan_Middle SPEED={SPEED}
+      SET_FAN_SPEED FAN=Monolith_Bed_Fan_Outside SPEED={SPEED}
+    {% endif %}
+    UPDATE_DELAYED_GCODE ID=bedfan_control DURATION=2
+  {% endif %}
+
+[gcode_macro TURN_OFF_HEATERS]
+rename_existing: _TURN_OFF_HEATERS
+gcode:
+  BEDFANS_OFF
+  _TURN_OFF_HEATERS
+
+[gcode_macro _M107_OVERRIDE]
+gcode:
+  BEDFANS_OFF
+  M107

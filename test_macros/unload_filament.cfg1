@@ -1,0 +1,28 @@
+[gcode_macro UNLOAD_FILAMENT]
+description: Unloads filament from toolhead
+gcode:
+  {% set EXTRUDER_TEMP = params.TEMP|default(230)|int %}
+  {% set MIN_TEMP = params.TEMP|default(230)|float * 0.98 %}
+  {% set CURRENT_TARGET = printer.extruder.target|float %}
+  CHOME
+  G91                         ; relative positioning
+  G1 Z20                      ; move nozzle upwards
+  FRONT                       ; move the toolhead to the front
+  {% if EXTRUDER_TEMP != 0 %}
+    STATUS_BUSY
+    {% if CURRENT_TARGET < EXTRUDER_TEMP %}
+      M104 S{EXTRUDER_TEMP} ; only heat up if the current extruder is not already hot
+    {% endif %}
+    TEMPERATURE_WAIT SENSOR="extruder" MINIMUM={MIN_TEMP} ; wait for min extrude temp to reach
+  {% endif %}
+  STATUS_READY
+  M83                         ; set extruder to relative mode
+  G1 E10 F300                 ; extrude a little to soften tip
+  G1 E-8 F3600                ; quickly retract a small amount to elimate stringing
+  G4 P200                     ; pause for a short amount of time
+  G1 E-50 F400                ; retract slowly the rest of the way
+  G1 E-100 F600
+  M400                        ; wait for moves to finish
+  M117 Unload Complete!
+  SET_LOGO_LEDS_OFF
+  

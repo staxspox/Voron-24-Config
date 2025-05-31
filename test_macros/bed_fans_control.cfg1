@@ -1,0 +1,89 @@
+[gcode_macro _BEDFANVARS]
+variable_threshold: 30      # Wentylatory włączają się dopiero od tej temperatury (0% mocy)
+variable_min_speed: 0.0     # Minimalna prędkość (0%)
+variable_max_speed: 1.0     # Maksymalna prędkość (100%)
+gcode:
+
+########## Konfiguracja wentylatorów łóżka ##########
+[fan_generic Monolith_Bed_Fan_Middle]
+pin: PD14
+kick_start_time: 0.1
+
+[fan_generic Monolith_Bed_Fan_Outside]
+pin: PD15
+kick_start_time: 0.1
+
+########## Nadpisanie komend sterujących temperaturą ##########
+[gcode_macro SET_HEATER_TEMPERATURE]
+rename_existing: _SET_HEATER_TEMPERATURE
+gcode:
+  # Parametry
+  {% set HEATER = params.HEATER|default("None") %}
+  {% set TARGET = params.TARGET|default(0)|int %}
+
+  # Ustaw temperaturę (dla extrudera lub łóżka)
+  {% if HEATER|lower == "extruder" %}
+    M104 S{TARGET}
+  {% elif HEATER|lower == "heater_bed" %}
+    M99140 S{TARGET}
+  {% else %}
+    {action_respond_info("Heater %s not supported" % HEATER)}
+  {% endif %}
+
+  # Uruchom pętlę regulacji wentylatorów, jeśli dotyczy łóżka
+  {% if HEATER|lower == "heater_bed" %}
+    UPDATE_DELAYED_GCODE ID=bedfan_ramp DURATION=1
+  {% endif %}
+
+[gcode_macro M140]
+rename_existing: M99140
+gcode:
+  SET_HEATER_TEMPERATURE HEATER=heater_bed TARGET={params.S|float}
+
+[gcode_macro M190]
+rename_existing: M99190
+gcode:
+  SET_HEATER_TEMPERATURE HEATER=heater_bed TARGET={params.S|float}
+  TEMPERATURE_WAIT SENSOR=heater_bed MINIMUM={params.S|float} MAXIMUM={params.S|float + 5}
+
+########## Pętla regulacji wentylatorów ##########
+
+[delayed_gcode bedfan_ramp]
+gcode:
+  # Pobierz aktualną i docelową temperaturę łóżka
+  {% set CURRENT = printer.heater_bed.temperature %}
+  {% set TARGET = printer.heater_bed.target %}
+  # Pobierz zmienne z _BEDFANVARS
+  {% set THRESHOLD = printer["gcode_macro _BEDFANVARS"].threshold|float %}
+  {% set MIN_SPEED = printer["gcode_macro _BEDFANVARS"].min_speed|float %}
+  {% set MAX_SPEED = printer["gcode_macro _BEDFANVARS"].max_speed|float %}
+
+  # Oblicz prędkość wentylatorów
+  {% if TARGET > THRESHOLD and CURRENT >= THRESHOLD %}
+    {% set RANGE = (TARGET - THRESHOLD) %}
+    {% set SPEED = ((CURRENT - THRESHOLD) / RANGE) * (MAX_SPEED - MIN_SPEED) + MIN_SPEED %}
+    # Ogranicz SPEED do zakresu MIN_SPEED..MAX_SPEED
+    {% if SPEED < MIN_SPEED %}{% set SPEED = MIN_SPEED %}{% endif %}
+    {% if SPEED > MAX_SPEED %}{% set SPEED = MAX_SPEED %}{% endif %}
+    
+    # Ustaw prędkość wentylatorów
+    SET_FAN_SPEED FAN=Monolith_Bed_Fan_Middle SPEED={SPEED}
+    SET_FAN_SPEED FAN=Monolith_Bed_Fan_Outside SPEED={SPEED}
+
+    # Kontynuuj aktualizację TYLKO jeśli wentylatory NIE są na 100%
+    {% if SPEED < MAX_SPEED %}
+      UPDATE_DELAYED_GCODE ID=bedfan_ramp DURATION=1
+    {% endif %}
+  {% else %}
+    # Wyłącz wentylatory, jeśli temperatura poniżej progu
+    SET_FAN_SPEED FAN=Monolith_Bed_Fan_Middle SPEED=0
+    SET_FAN_SPEED FAN=Monolith_Bed_Fan_Outside SPEED=0
+  {% endif %}
+  
+########## Wyłączanie wentylatorów przy wyłączaniu grzania ##########
+[gcode_macro TURN_OFF_HEATERS]
+rename_existing: _TURN_OFF_HEATERS
+gcode:
+  SET_FAN_SPEED FAN=Monolith_Bed_Fan_Middle SPEED=0
+  SET_FAN_SPEED FAN=Monolith_Bed_Fan_Outside SPEED=0
+  _TURN_OFF_HEATERS
