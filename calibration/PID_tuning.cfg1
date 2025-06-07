@@ -1,0 +1,23 @@
+[gcode_macro PID_TUNE]
+description: Universal PID tuning
+gcode:
+  {% set HEATER = 'heater_bed' if params.HEATER|string == 'bed' else 'extruder' %}
+  {% set TARGET = params.TARGET|default(270 if HEATER == 'extruder' else 60)|float %}
+  {% set CYCLES = params.CYCLES|default(5)|int %}
+  
+  RESPOND MSG="Starting PID for {HEATER} at {TARGET}°C"
+  PID_CALIBRATE HEATER={HEATER} TARGET={TARGET} CYCLES={CYCLES}
+  TURN_OFF_HEATERS
+  SAVE_CONFIG
+
+[menu __main __settings __pid_extruder]
+type: command
+name: PID Extruder
+enable: true
+gcode: PID_TUNE HEATER=extruder TARGET=270 CYCLES=5
+
+[menu __main __settings __pid_bed]
+type: command
+name: PID Bed
+enable: true
+gcode: PID_TUNE HEATER=heater_bed TARGET=60 CYCLES=5
