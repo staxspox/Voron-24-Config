@@ -1,0 +1,59 @@
+[gcode_macro PID_TUNE]
+description: Universal PID tuning with bed fan control
+gcode:
+  # Parametry wejściowe
+  {% set HEATER = 'heater_bed' if params.HEATER|string == 'bed' else 'extruder' %}
+  {% set TARGET = params.TARGET|default(270 if HEATER == 'extruder' else 110)|float %}
+  {% set CYCLES = params.CYCLES|default(5)|int %}
+  
+  # Zmienne wentylatorów z _BEDFANVARS
+  {% set THRESHOLD = printer["gcode_macro _BEDFANVARS"].threshold|int %}
+  {% set SLOW_SPEED = printer["gcode_macro _BEDFANVARS"].slow|float %}
+  {% set FAST_SPEED = printer["gcode_macro _BEDFANVARS"].fast|float %}
+
+  # Walidacja
+  {% if HEATER not in ['extruder', 'heater_bed'] %}
+    { action_raise_error("Invalid HEATER. Use 'extruder' or 'heater_bed'") }
+  {% endif %}
+
+  RESPOND TYPE=command MSG="Starting PID tuning for {HEATER} at {TARGET}°C"
+
+  # Sterowanie wentylatorami tylko dla łoża
+  {% if HEATER == 'heater_bed' and TARGET >= THRESHOLD %}
+    # Włącz wentylatory na wolne obroty podczas nagrzewania
+    SET_FAN_SPEED FAN=Monolith_Bed_Fan_Middle SPEED={SLOW_SPEED}
+    SET_FAN_SPEED FAN=Monolith_Bed_Fan_Outside SPEED={SLOW_SPEED}
+    
+    # Uruchom pętlę monitorującą (działa równolegle z PID_CALIBRATE)
+    UPDATE_DELAYED_GCODE ID=pidtune_bedfanloop DURATION=5
+  {% endif %}
+
+  # Główna komenda strojenia
+  PID_CALIBRATE HEATER={HEATER} TARGET={TARGET} CYCLES={CYCLES}
+  
+  # Wyłącz grzałki i zapisz konfigurację
+  TURN_OFF_HEATERS
+  SAVE_CONFIG
+
+  # Komunikat końcowy
+  RESPOND TYPE=command MSG="PID tuning completed for {HEATER}"
+
+# Pętla monitorująca dla wentylatorów łoża
+[delayed_gcode pidtune_bedfanloop]
+gcode:
+  {% if printer.heater_bed.target >= printer["gcode_macro _BEDFANVARS"].threshold|int %}
+    {% if printer.heater_bed.temperature >= (printer.heater_bed.target - 1) %}
+      # Temperatura osiągnięta - pełna moc wentylatorów
+      SET_FAN_SPEED FAN=Monolith_Bed_Fan_Middle SPEED={printer["gcode_macro _BEDFANVARS"].fast|float}
+      SET_FAN_SPEED FAN=Monolith_Bed_Fan_Outside SPEED={printer["gcode_macro _BEDFANVARS"].fast|float}
+    {% else %}
+      # Kontynuuj nagrzewanie - wolne obroty
+      SET_FAN_SPEED FAN=Monolith_Bed_Fan_Middle SPEED={printer["gcode_macro _BEDFANVARS"].slow|float}
+      SET_FAN_SPEED FAN=Monolith_Bed_Fan_Outside SPEED={printer["gcode_macro _BEDFANVARS"].slow|float}
+      UPDATE_DELAYED_GCODE ID=pidtune_bedfanloop DURATION=5
+    {% endif %}
+  {% else %}
+    # Temperatura poniżej progu - wyłącz wentylatory
+    SET_FAN_SPEED FAN=Monolith_Bed_Fan_Middle SPEED=0
+    SET_FAN_SPEED FAN=Monolith_Bed_Fan_Outside SPEED=0
+  {% endif %}
