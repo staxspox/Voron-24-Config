@@ -1,0 +1,132 @@
+[gcode_macro SQUIGGLY_PURGE]
+gcode:
+    {% set PI = 3.14159 %}
+    {% set TAU = 2 * PI %}
+    
+    # Parametry główne
+    {% set prime_line_steps = params.STEPS|default(16)|int %}
+    {% set prime_line_periods = params.PERIODS|default(10)|int %}
+    {% set prime_line_amplitude = params.AMPLITUDE|default(5.0)|float %}
+    {% set prime_line_period_length = params.PERIOD_LENGTH|default(5.0)|float %}
+    {% set prime_line_purge_distance = params.PURGE_LENGTH|default(100.0)|float %}
+    {% set prime_line_flowrate = params.FLOWRATE|default(10.0)|float %}
+    {% set prime_line_height = params.LINE_HEIGHT|default(0.6)|float %}
+    {% set prime_line_unretract_length = params.UNRETRACT_LENGTH|default(5.0)|float %}
+    {% set prime_line_direction = params.LINE_DIRECTION|default("X")|string|upper %}
+    {% set prime_line_margin = params.LINE_MARGIN|default(10.0)|float %}
+    {% set prime_line_adaptive = params.ADAPTIVE_MODE|default(1)|int %}
+    {% set verbose = params.VERBOSE|default(1)|int %}
+
+    # Obszar wydruku
+    {% set coordinates_found = False %}
+    {% if params.SIZE is defined and params.SIZE != "0_0_0_0" %}
+        {% set xMinSpec, yMinSpec, xMaxSpec, yMaxSpec = params.SIZE.split('_')|map('trim')|map('int') %}
+        {% set coordinates_found = True %}
+    {% elif printer.exclude_object is defined and printer.exclude_object.objects %}
+        {% set eo_points = printer.exclude_object.objects|map(attribute='polygon')|sum(start=[]) %}
+        {% set xMinSpec = eo_points|map(attribute=0)|min %}
+        {% set yMinSpec = eo_points|map(attribute=1)|min %}
+        {% set xMaxSpec = eo_points|map(attribute=0)|max %}
+        {% set yMaxSpec = eo_points|map(attribute=1)|max %}
+        {% set coordinates_found = True %}
+    {% endif %}
+
+    {% set prime_line_x = params.START_X|default(5.0)|float %}
+    {% set prime_line_y = params.START_Y|default(3.5)|float %}
+    {% set center_x = printer.toolhead.axis_maximum.x / 2 %}
+    {% set center_y = printer.toolhead.axis_maximum.y / 2 %}
+
+    {% if prime_line_direction == "X" %}
+        {% set offset_x, offset_y = 0, prime_line_amplitude/2 %}
+    {% else %}
+        {% set offset_x, offset_y = prime_line_amplitude/2, 0 %}
+    {% endif %}
+
+    {% if coordinates_found and prime_line_adaptive == 1 %}
+        {% set prime_line_x = 2*center_x - prime_line_x if (prime_line_x > center_x and xMaxSpec < center_x) or (prime_line_x < center_x and xMinSpec > center_x) else prime_line_x %}
+        {% set prime_line_y = 2*center_y - prime_line_y if (prime_line_y > center_y and yMaxSpec < center_y) or (prime_line_y < center_y and yMinSpec > center_y) else prime_line_y %}
+        {% set prime_line_x = [[prime_line_x, xMinSpec - prime_line_margin - offset_x]|max, xMaxSpec + prime_line_margin + offset_x]|min %}
+        {% set prime_line_y = [[prime_line_y, yMinSpec - prime_line_margin - offset_y]|max, yMaxSpec + prime_line_margin + offset_y]|min %}
+    {% endif %}
+
+    {% set prime_line_way = -1 if (prime_line_direction == "X" and prime_line_x > center_x) or (prime_line_direction == "Y" and prime_line_y > center_y) else 1 %}
+
+    {% set steps = [] %}
+    {% set state = namespace(cur_y=prime_line_y, prime_line_length=0.0) %}
+
+    {% for step in range(1, prime_line_periods * prime_line_steps + 1) %}
+        {% set angle = step / prime_line_steps * TAU %}
+        {% set dist_x = step * prime_line_period_length / prime_line_steps %}
+        {% set dist_y = prime_line_amplitude * math.sin(angle) %}
+        {% set rel_x = prime_line_period_length / prime_line_steps %}
+        {% set rel_y = prime_line_y + dist_y - state.cur_y %}
+        {% set e_length = (rel_x**2 + rel_y**2)**0.5 %}
+        {% set state.cur_y = state.cur_y + rel_y %}
+        {% set state.prime_line_length = state.prime_line_length + e_length %}
+        {% set _ = steps.append((rel_x, rel_y, e_length)) %}
+    {% endfor %}
+
+    {% set max_extrude_cross_section = printer["configfile"].config["extruder"]["max_extrude_cross_section"]|float %}
+    {% set filament_diameter = printer["configfile"].config["extruder"]["filament_diameter"]|float %}
+    {% set filament_area = PI * (filament_diameter / 2)**2 %}
+    {% set purge_volume = prime_line_purge_distance * filament_area %}
+    {% set line_width = purge_volume / (prime_line_height * state.prime_line_length) %}
+
+    {% if (prime_line_height * line_width) > max_extrude_cross_section %}
+        {% if verbose %}
+            {action_respond_info("Purging %.1f mm³ exceeds max_extrude_cross_section. Auto-correcting..." % purge_volume)}
+        {% endif %}
+        {% set prime_line_purge_distance = 0.98 * (max_extrude_cross_section * state.prime_line_length) / filament_area %}
+        {% set purge_volume = prime_line_purge_distance * filament_area %}
+        {% set line_width = purge_volume / (prime_line_height * state.prime_line_length) %}
+    {% endif %}
+
+    {% if (prime_line_height / line_width) >= 0.5 %}
+        {action_raise_error("Prime line too thin (%.2f x %.2f). Adjust purge length or flowrate!" % (prime_line_height, line_width))}
+    {% endif %}
+
+    {% set speed = (prime_line_flowrate / (prime_line_height * line_width)) * 60 |float %}
+
+    G91
+    M83
+    {% if (printer.toolhead.position.z < 5) %}
+        G1 Z5 F600
+    {% endif %}
+
+    G90
+    G0 X{prime_line_x} Y{prime_line_y} F18000
+    G1 Z{prime_line_height*0.8} F600
+    G92 E0
+    G1 E{prime_line_unretract_length} F300
+    G92 E0
+    G91
+
+    {% if prime_line_direction == "X" %}
+        {% for x, y, e in steps %}
+            {% set dx = x * prime_line_way %}
+            G1 X{dx:.3f} Y{y:.3f} E{{ (e/state.prime_line_length*prime_line_purge_distance)|round(5) }} F{speed|int}
+            {% if verbose >= 2 %}
+                {action_respond_info("X%.2f Y%.2f E%.5f" % (dx, y, e/state.prime_line_length*prime_line_purge_distance))}
+            {% endif %}
+        {% endfor %}
+    {% elif prime_line_direction == "Y" %}
+        {% for y, x, e in steps %}
+            {% set dy = y * prime_line_way %}
+            G1 X{x:.3f} Y{dy:.3f} E{{ (e/state.prime_line_length*prime_line_purge_distance)|round(5) }} F{speed|int}
+            {% if verbose >= 2 %}
+                {action_respond_info("X%.2f Y%.2f E%.5f" % (x, dy, e/state.prime_line_length*prime_line_purge_distance))}
+            {% endif %}
+        {% endfor %}
+    {% else %}
+        {action_respond_error("Invalid LINE_DIRECTION: use X or Y")}
+    {% endif %}
+
+    G90
+    G92 E0
+    G1 E-0.2 F2100
+    G92 E0
+    G1 Z3 F600
+    G91
+    G1 X5 Y5 F18000
+    G90
+    M400

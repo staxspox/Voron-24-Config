@@ -1,9 +1,9 @@
 [gcode_macro DATA_SAMPLE]
 gcode:
-  {% set bed_temp = params.BED_TEMP|default(90)|int %}
-  {% set nozzle_temp = params.NOZZLE_TEMP|default(250)|int %}
-  {% set min_temp = params.MIN_TEMP|default(40)|int %}
-  {% set max_temp = params.MAX_TEMP|default(70)|int %}
+  {% set bed_temp = params.BED_TEMP|default(110)|int %} #90
+  {% set nozzle_temp = params.NOZZLE_TEMP|default(270)|int %} #250
+  {% set min_temp = params.MIN_TEMP|default(40)|int %} #Coil min temp
+  {% set max_temp = params.MAX_TEMP|default(70)|int %} #Coil max temp
   G90
   M106 S255
   RESPOND TYPE=command MSG='Waiting for Coil to cool to 40'
