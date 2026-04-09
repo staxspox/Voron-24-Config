@@ -1,0 +1,209 @@
+[gcode_macro CHAMBER_HEATSOAK]
+description: Intelligent dynamic chamber heat soak - minimal times
+variable_stage: "idle"
+variable_bed_target: 60
+variable_chamber_min: 0
+variable_max_rate: 0.20
+variable_min_soak_time: 600
+variable_total_time: 0
+variable_temp_history: []
+variable_rate_history: []
+variable_check_interval: 12
+variable_soak_smooth_seconds: 75
+variable_timeout_minutes: 75
+variable_complete_macro: ""
+variable_cancel_macro: "CANCEL_PRINT"
+
+gcode:
+    # ZABEZPIECZENIE PRZED PODWÓJNYM SOAKIEM
+    {% set current_stage = printer["gcode_macro CHAMBER_HEATSOAK"].stage %}
+    {% if current_stage != "idle" %}
+        { action_respond_info("⚠️ CHAMBER_HEATSOAK already running (stage: %s) - skipping duplicate" % current_stage) }
+        return
+    {% endif %}
+
+    # Sprawdź czy czujnik komory istnieje
+    {% if printer["temperature_sensor chamber"] is not defined %}
+        { action_raise_error("CHAMBER_HEATSOAK: temperature_sensor chamber not found! Configure it first.") }
+        return
+    {% endif %}
+
+    {% set BED_TEMP = params.BED_TEMP|default(60)|int %}
+    {% set MATERIAL = params.MATERIAL|default("UNKNOWN")|upper|replace(" ", "_")|replace("-", "_") %}
+    {% set CHAMBER_OVERRIDE = params.CHAMBER_TEMP|default(0)|int %}
+
+    # Reset zmiennych
+    SET_GCODE_VARIABLE MACRO=CHAMBER_HEATSOAK VARIABLE=stage VALUE="'idle'"
+    SET_GCODE_VARIABLE MACRO=CHAMBER_HEATSOAK VARIABLE=bed_target VALUE={BED_TEMP}
+    SET_GCODE_VARIABLE MACRO=CHAMBER_HEATSOAK VARIABLE=chamber_min VALUE=0
+    SET_GCODE_VARIABLE MACRO=CHAMBER_HEATSOAK VARIABLE=max_rate VALUE=0.20
+    SET_GCODE_VARIABLE MACRO=CHAMBER_HEATSOAK VARIABLE=min_soak_time VALUE=600
+    SET_GCODE_VARIABLE MACRO=CHAMBER_HEATSOAK VARIABLE=total_time VALUE=0
+    SET_GCODE_VARIABLE MACRO=CHAMBER_HEATSOAK VARIABLE=temp_history VALUE="[]"
+    SET_GCODE_VARIABLE MACRO=CHAMBER_HEATSOAK VARIABLE=rate_history VALUE="[]"
+
+    # === CHECK IF SOAK NEEDED ===
+    {% set high_temp_materials = ["ABS", "ABS_CF", "ASA", "ASA_CF", "PC", "PC_CF", "PC+CF", "PC+ABS", "PC+ABS_CF", "POLYCARBONATE", "NYLON", "NYLON12", "NYLON_CF", "PA6", "PA6_CF", "PA", "PA12", "PEEK", "PEEK_CF", "PEI", "PEI_CF", "PPS", "PPS_CF", "PPA", "PVDF"] %}
+    
+    {% if CHAMBER_OVERRIDE <= 0 or BED_TEMP < 85 or MATERIAL not in high_temp_materials %}
+        { action_respond_info("%s + bed %d°C → soak not needed" % (MATERIAL, BED_TEMP)) }
+        M117 Soak skipped
+        STATUS_READY
+        G4 P500
+        return
+    {% endif %}
+
+    # === DETERMINE TARGETS PER MATERIAL - ABSOLUTNE MINIMUM ===
+    {% if CHAMBER_OVERRIDE > 0 %}
+        {% set CHAMBER_MIN = CHAMBER_OVERRIDE %}
+        {% set MIN_SOAK_SEC = 900 %}
+        {% set MSG = "Orca override %d°C" % CHAMBER_OVERRIDE %}
+    {% elif MATERIAL in ["PCABS", "PC+ABS", "PC-ABS", "PC_ABS"] %}
+        {% set CHAMBER_MIN = 52 %}
+        {% set MIN_SOAK_SEC = 900 %}      # 15 minut
+        {% set MSG = "PC-ABS minimal soak" %}
+    {% elif MATERIAL in ["PC", "PC_CF", "PC+CF", "POLYCARBONATE"] %}
+        {% set CHAMBER_MIN = 55 %}
+        {% set MIN_SOAK_SEC = 1200 %}     # 20 minut
+        {% set MSG = "PC minimal soak" %}
+    {% elif MATERIAL in ["ABS", "ABS_CF", "ASA", "ASA_CF"] %}
+        {% set CHAMBER_MIN = 48 %}
+        {% set MIN_SOAK_SEC = 600 %}      # 10 minut
+        {% set MSG = "ABS/ASA minimal soak" %}
+    {% elif "NYLON" in MATERIAL or "PA" in MATERIAL %}
+        {% set CHAMBER_MIN = 50 %}
+        {% set MIN_SOAK_SEC = 900 %}      # 15 minut
+        {% set MSG = "Nylon minimal soak" %}
+    {% elif MATERIAL in ["PPS", "PPS_CF"] %}
+        {% set CHAMBER_MIN = 65 %}
+        {% set MIN_SOAK_SEC = 1200 %}     # 20 minut
+        {% set MSG = "PPS minimal soak" %}
+    {% elif MATERIAL in ["PEEK", "PEEK_CF", "PEI", "PEI_CF"] %}
+        {% set CHAMBER_MIN = 80 %}
+        {% set MIN_SOAK_SEC = 1800 %}     # 30 minut
+        {% set MSG = "PEEK/PEI minimal soak" %}
+    {% else %}
+        {% set CHAMBER_MIN = 48 %}
+        {% set MIN_SOAK_SEC = 600 %}      # 10 minut
+        {% set MSG = "High-temp minimal soak" %}
+    {% endif %}
+
+    SET_GCODE_VARIABLE MACRO=CHAMBER_HEATSOAK VARIABLE=chamber_min VALUE={CHAMBER_MIN}
+    SET_GCODE_VARIABLE MACRO=CHAMBER_HEATSOAK VARIABLE=min_soak_time VALUE={MIN_SOAK_SEC}
+    SET_GCODE_VARIABLE MACRO=CHAMBER_HEATSOAK VARIABLE=stage VALUE="'heating'"
+
+    { action_respond_info("%s | Bed:%d°C | Chamber target:%d°C | Dynamic soak (rate < %.2f°C/min)" % (MSG, BED_TEMP, CHAMBER_MIN, printer["gcode_macro CHAMBER_HEATSOAK"].max_rate)) }
+    M117 {MSG}...
+
+    # Grzanie łóżka
+    M190 S{BED_TEMP}
+
+    # Skip jeśli już gorąco
+    {% set current_chamber = printer["temperature_sensor chamber"].temperature|float(0) %}
+    {% if current_chamber >= CHAMBER_MIN %}
+        { action_respond_info("Chamber już >= %d°C (%.1f°C) – skip" % (CHAMBER_MIN, current_chamber)) }
+        M117 Chamber OK
+        UPDATE_DELAYED_GCODE ID=_chamber_soak_loop DURATION=0
+        SET_GCODE_VARIABLE MACRO=CHAMBER_HEATSOAK VARIABLE=stage VALUE="'idle'"
+        STATUS_READY
+        return
+    {% endif %}
+
+    # Czekaj na minimum temp
+    TEMPERATURE_WAIT SENSOR="temperature_sensor chamber" MINIMUM={CHAMBER_MIN}
+    { action_respond_info("Chamber >= %d°C → start dynamic rate soak" % CHAMBER_MIN) }
+    M117 Soaking dynamically...
+
+    # ==================== PARK NOZZLE ====================
+    { action_respond_info("Parking nozzle for heatsoak...") }
+    G90
+    G1 X{printer.toolhead.axis_maximum.x / 2} Y{printer.toolhead.axis_maximum.y - 30} Z50 F8000
+
+    # Pauza
+    PAUSE
+
+    # Start background loop
+    SET_GCODE_VARIABLE MACRO=CHAMBER_HEATSOAK VARIABLE=stage VALUE="'soaking'"
+    UPDATE_DELAYED_GCODE ID=_chamber_soak_loop DURATION={printer["gcode_macro CHAMBER_HEATSOAK"].check_interval}
+
+
+# ================== BACKGROUND LOOP ==================
+[delayed_gcode _chamber_soak_loop]
+gcode:
+    {% set hs = printer["gcode_macro CHAMBER_HEATSOAK"] %}
+    {% set current_temp = printer["temperature_sensor chamber"].temperature|float(0) %}
+    {% set total_time = hs.total_time + hs.check_interval %}
+    SET_GCODE_VARIABLE MACRO=CHAMBER_HEATSOAK VARIABLE=total_time VALUE={total_time}
+
+    # Historia temperatury
+    {% set history = hs.temp_history %}
+    {% set _ = history.append(current_temp) %}
+    {% if history|length > (hs.soak_smooth_seconds / hs.check_interval) + 5 %}
+        {% set history = history[1:] %}
+    {% endif %}
+    SET_GCODE_VARIABLE MACRO=CHAMBER_HEATSOAK VARIABLE=temp_history VALUE="{history}"
+
+    # Oblicz rate
+    {% set rate = 0.0 %}
+    {% if history|length > 6 %}
+        {% set old_temp = history[0] %}
+        {% set time_diff_min = (hs.soak_smooth_seconds / 60.0) %}
+        {% set rate = ((current_temp - old_temp) / time_diff_min) | abs %}
+    {% endif %}
+
+    # Historia rate
+    {% set rate_history = hs.rate_history %}
+    {% set _ = rate_history.append(rate) %}
+    {% if rate_history|length > 10 %}
+        {% set rate_history = rate_history[-10:] %}
+    {% endif %}
+    SET_GCODE_VARIABLE MACRO=CHAMBER_HEATSOAK VARIABLE=rate_history VALUE="{rate_history}"
+
+    # Log co 30s
+    {% if (total_time % 30) == 0 %}
+        { action_respond_info("Soak: %.1f°C | rate: %.3f°C/min | elapsed: %.1f min" % (current_temp, rate, total_time/60)) }
+        M117 Soak {current_temp|round(1)}C  {rate|round(2)}C/min
+    {% endif %}
+
+    # Warunek zakończenia
+    {% set min_soak_passed = total_time >= hs.min_soak_time %}
+    {% set rate_ok = rate < hs.max_rate %}
+    {% if min_soak_passed and rate_ok %}
+        { action_respond_info("Heat soak COMPLETE - chamber stable at %.1f°C (rate %.3f°C/min)" % (current_temp, rate)) }
+        M117 Soak DONE!
+        SET_GCODE_VARIABLE MACRO=CHAMBER_HEATSOAK VARIABLE=stage VALUE="'done'"
+        UPDATE_DELAYED_GCODE ID=_chamber_soak_loop DURATION=0
+        STATUS_READY
+        RESUME
+        return
+    {% endif %}
+
+    # Timeout
+    {% if total_time / 60 > hs.timeout_minutes %}
+        { action_respond_info("Heat soak TIMEOUT after %.1f min" % (total_time/60)) }
+        M117 Soak timeout
+        UPDATE_DELAYED_GCODE ID=_chamber_soak_loop DURATION=0
+        SET_GCODE_VARIABLE MACRO=CHAMBER_HEATSOAK VARIABLE=stage VALUE="'idle'"
+        BEDFANSOFF
+        CANCEL_PRINT
+        return
+    {% endif %}
+
+    # Kontynuuj loop
+    UPDATE_DELAYED_GCODE ID=_chamber_soak_loop DURATION={hs.check_interval}
+
+
+# ================== CANCEL ==================
+[gcode_macro CANCEL_CHAMBER_HEATSOAK]
+description: Cancel dynamic heat soak
+gcode:
+    UPDATE_DELAYED_GCODE ID=_chamber_soak_loop DURATION=0
+    UPDATE_DELAYED_GCODE ID=bedfanramp DURATION=0
+  
+    SET_GCODE_VARIABLE MACRO=CHAMBER_HEATSOAK VARIABLE=stage VALUE="'idle'"
+    { action_respond_info("Chamber heat soak cancelled by user") }
+    M117 Soak cancelled
+  
+    BEDFANSOFF
+    STATUS_READY
+    RESUME
